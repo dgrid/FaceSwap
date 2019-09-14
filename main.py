@@ -2,7 +2,9 @@
 import os
 import cv2
 import argparse
+from glob import glob
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from face_detection import face_detection
@@ -14,8 +16,7 @@ def select_face(im, r=10):
     faces = face_detection(im)
 
     if len(faces) == 0:
-        print('Detect 0 Face !!!')
-        exit(-1)
+        raise ValueError("Detect 0 Face !!!")
 
     if len(faces) == 1:
         bbox = faces[0]
@@ -30,7 +31,7 @@ def select_face(im, r=10):
                 if face.left() < x < face.right() and face.top() < y < face.bottom():
                     bbox.append(face)
                     break
-        
+
         im_copy = im.copy()
         for face in faces:
             # draw the face bounding box
@@ -43,40 +44,49 @@ def select_face(im, r=10):
         bbox = bbox[0]
 
     points = np.asarray(face_points_detection(im, bbox))
-    
+
     im_w, im_h = im.shape[:2]
     left, top = np.min(points, 0)
     right, bottom = np.max(points, 0)
-    
+
     x, y = max(0, left-r), max(0, top-r)
     w, h = min(right+r, im_h)-x, min(bottom+r, im_w)-y
 
     return points - np.asarray([[x, y]]), (x, y, w, h), im[y:y+h, x:x+w]
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='FaceSwapApp')
-    parser.add_argument('--src', required=True, help='Path for source image')
-    parser.add_argument('--dst', required=True, help='Path for target image')
-    parser.add_argument('--out', required=True, help='Path for storing output images')
-    parser.add_argument('--warp_2d', default=False, action='store_true', help='2d or 3d warp')
-    parser.add_argument('--correct_color', default=False, action='store_true', help='Correct color')
-    parser.add_argument('--no_debug_window', default=False, action='store_true', help='Don\'t show debug window')
-    args = parser.parse_args()
+def resize_image(img, resolution=128):
+    # ref: https://jdhao.github.io/2017/11/06/resize-image-to-square-with-padding/
+    h, w, _ = img.shape
 
-    # Read images
-    src_img = cv2.imread(args.src)
-    dst_img = cv2.imread(args.dst)
+    factor = min(resolution / h, resolution / w)
+    resized_img = cv2.resize(img, (int(w * factor), int(h * factor)), interpolation=cv2.INTER_LANCZOS4)
 
-    # Select src face
-    src_points, src_shape, src_face = select_face(src_img)
-    # Select dst face
-    dst_points, dst_shape, dst_face = select_face(dst_img)
+    delta_h = resolution - resized_img.shape[0]
+    delta_w = resolution - resized_img.shape[1]
+
+    top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+    left, right = delta_w // 2, delta_w - (delta_w // 2)
+
+    color = [0, 0, 0]
+    new_im = cv2.copyMakeBorder(resized_img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+
+    return new_im
+
+
+def swap_face_pair(src_img, dst_img, warp_2d, correct_color):
+    try:
+        # Select src face
+        src_points, src_shape, src_face = select_face(src_img)
+        # Select dst face
+        dst_points, dst_shape, dst_face = select_face(dst_img)
+    except ValueError as err:
+        raise err
 
     h, w = dst_face.shape[:2]
-    
+
     ### Warp Image
-    if not args.warp_2d:
+    if not warp_2d:
         ## 3d warp
         warped_src_face = warp_image_3d(src_face, src_points[:48], dst_points[:48], (h, w))
     else:
@@ -84,7 +94,7 @@ if __name__ == '__main__':
         src_mask = mask_from_points(src_face.shape[:2], src_points)
         src_face = apply_mask(src_face, src_mask)
         # Correct Color for 2d warp
-        if args.correct_color:
+        if correct_color:
             warped_dst_img = warp_image_3d(dst_face, dst_points[:48], src_points[:48], src_face.shape[:2])
             src_face = correct_colours(warped_dst_img, src_face, src_points)
         # Warp
@@ -96,11 +106,11 @@ if __name__ == '__main__':
     mask = np.asarray(mask*mask_src, dtype=np.uint8)
 
     ## Correct color
-    if not args.warp_2d and args.correct_color:
+    if not warp_2d and correct_color:
         warped_src_face = apply_mask(warped_src_face, mask)
         dst_face_masked = apply_mask(dst_face, mask)
         warped_src_face = correct_colours(dst_face_masked, warped_src_face, dst_points)
-    
+
     ## Shrink the mask
     kernel = np.ones((10, 10), np.uint8)
     mask = cv2.erode(mask, kernel, iterations=1)
@@ -114,16 +124,62 @@ if __name__ == '__main__':
     dst_img_cp[y:y+h, x:x+w] = output
     output = dst_img_cp
 
-    dir_path = os.path.dirname(args.out)
-    if not os.path.isdir(dir_path):
-        os.makedirs(dir_path)
+    return output
 
-    cv2.imwrite(args.out, output)
 
-    ##For debug
-    if not args.no_debug_window:
-        cv2.imshow("From", dst_img)
-        cv2.imshow("To", output)
-        cv2.waitKey(0)
-        
-        cv2.destroyAllWindows()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='FaceSwapApp')
+    parser.add_argument('--src_dir', required=True, help='Path for source image directory')
+    parser.add_argument('--dst_dir', required=True, help='Path for target image directory')
+    parser.add_argument('--out_dir', required=True, help='Path for storing output images')
+    parser.add_argument('--warp_2d', default=False, action='store_true', help='2d or 3d warp')
+    parser.add_argument('--correct_color', default=False, action='store_true', help='Correct color')
+    args = parser.parse_args()
+
+    resolution = 1024  # TODO
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # TODO: filter only image files
+    list_src_path = list(glob(os.path.join(args.src_dir, "*")))
+    list_dst_path = list(glob(os.path.join(args.dst_dir, "*")))
+
+    list_src_imgs = [cv2.imread(path) for path in list_src_path]
+    list_dst_imgs = [cv2.imread(path) for path in list_dst_path]
+
+    num_rows = len(list_src_imgs) + 1
+    num_cols = len(list_dst_imgs) + 1
+
+    grids = [[np.zeros((resolution, resolution, 3), dtype=np.uint8) for _ in range(num_cols)]
+                for _ in range(num_rows)]
+
+    # original images
+    for i, src_img in enumerate(list_src_imgs):
+        grids[i + 1][0] = resize_image(src_img, resolution)
+    for j, dst_img in enumerate(list_dst_imgs):
+        grids[0][j + 1] = resize_image(dst_img, resolution)
+
+    for i, src_img in enumerate(list_src_imgs):
+        for j, dst_img in enumerate(list_dst_imgs):
+            # face swap
+            try:
+                output = swap_face_pair(src_img, dst_img, args.warp_2d, args.correct_color)
+                out_path = os.path.join(args.out_dir, f"output_{i}_{j}.jpeg")
+                print("save", i, j)
+                cv2.imwrite(out_path, output)
+            except ValueError as err:
+                print(err)
+                continue
+            grids[i + 1][j + 1] = resize_image(output, resolution)
+
+    # import pdb; pdb.set_trace()
+    grid_arr = np.concatenate([np.concatenate([grids[i][j] for j in range(num_cols)], axis=1)
+                                for i in range(num_rows)], axis=0)
+
+    img_display_factor = 2
+
+    # fig, ax = plt.subplots(figsize=(num_cols * img_display_factor, num_rows * img_display_factor))
+    # ax.imshow(cv2.cvtColor(grid_arr, cv2.COLOR_BGR2RGB))
+    # ax.axis('off')
+    # plt.savefig(os.path.join(args.out_dir, "grid.jpeg"))
+    cv2.imwrite(os.path.join(args.out_dir, "grid.jpeg"), grid_arr)
